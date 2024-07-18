@@ -643,16 +643,120 @@ func (cmd *AggregateCmd) String() string {
 }
 
 func (cmd *AggregateCmd) readReply(rd *proto.Reader) (err error) {
-	data, err := rd.ReadSlice()
+	typ, err := rd.PeekReplyType()
 	if err != nil {
-		cmd.err = err
+		return err
+	}
+
+	switch typ {
+	case proto.RespMap:
+		const items = 5
+
+		if err = rd.ReadFixedMapLen(items); err != nil {
+			return err
+		}
+
+		cmd.val = &FTAggregateResult{}
+
+		for i := 0; i < items; i++ {
+			var param string
+			if param, err = rd.ReadString(); err != nil {
+				return err
+			}
+
+			switch param {
+			case "attributes":
+				n, err := rd.ReadArrayLen()
+				if err != nil {
+					return err
+				}
+
+				for i := 0; i < n; i++ {
+					return fmt.Errorf("attributes are not implemented")
+				}
+
+			case "total_results":
+				total, err := rd.ReadInt()
+				if err != nil {
+					return err
+				}
+				cmd.val.Total = int(total)
+
+			case "format":
+				format, err := rd.ReadString()
+				if err != nil {
+					return err
+				}
+
+				// only STRING and EXPAND, no idea what to do with it
+				// https://github.com/RediSearch/RediSearch/blob/1c432d274f26513dbc6abe1a35b95eba71ff2cb8/src/aggregate/aggregate_exec.c#L580
+				_ = format // what to do with it??
+
+			case "results":
+				data, err := rd.ReadSlice()
+				if err != nil {
+					return err
+				}
+
+				cmd.val.Rows = make([]AggregateRow, len(data))
+				for i, rowRaw := range data {
+					for keyRaw, valueRaw := range rowRaw.(map[any]any) {
+						key, ok := keyRaw.(string)
+						if !ok {
+							return fmt.Errorf("invalid field key format")
+						}
+
+						switch key {
+						case "values":
+							// what to do with it?
+						case "extra_attributes":
+							value, ok := valueRaw.(map[any]any)
+							if !ok {
+								return fmt.Errorf("invalid field value format")
+							}
+
+							cmd.val.Rows[i].Fields = make(map[string]interface{}, len(value))
+							for keyRaw, value := range value {
+								key, ok := keyRaw.(string)
+								if !ok {
+									return fmt.Errorf("invalid field key format")
+								}
+								cmd.val.Rows[i].Fields[key] = value
+							}
+
+						default:
+							return fmt.Errorf("unexpected field: %#v", key)
+						}
+
+					}
+				}
+
+			case "warning":
+				n, err := rd.ReadArrayLen()
+				if err != nil {
+					return err
+				}
+
+				for i := 0; i < n; i++ {
+					return fmt.Errorf("warnings are not implemented")
+				}
+
+			default:
+				return fmt.Errorf("unexpected parameter: %s", param)
+			}
+		}
+
+		return nil
+
+	default: // proto.RespArray
+		if data, err := rd.ReadSlice(); err != nil {
+			cmd.err = err
+			return nil
+		} else if cmd.val, err = ProcessAggregateResult(data); err != nil {
+			cmd.err = err
+		}
 		return nil
 	}
-	cmd.val, err = ProcessAggregateResult(data)
-	if err != nil {
-		cmd.err = err
-	}
-	return nil
 }
 
 // FTAggregateWithArgs - Performs a search query on an index and applies a series of aggregate transformations to the result.
